@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { createShell, runCommand, ShellState } from './shell'
+import { createShell, runCommand, ShellState, FSNode } from './shell'
 import styles from './Terminal.module.css'
 
 interface Line {
@@ -109,8 +109,13 @@ export default function Terminal() {
         const normalized = resolvedDir.replace(/\/+/g, '/').replace(/\/$/, '') || '/'
         const node = normalized === '/' ? shell.fs : (() => {
           const p = normalized.split('/').filter(Boolean)
-          let n: any = shell.fs
-          for (const seg of p) { if (n?.type === 'dir') n = n.children[seg]; else return null }
+          let n: FSNode = shell.fs
+          for (const seg of p) {
+            if (n.type !== 'dir') return null
+            const child: FSNode | undefined = n.children[seg]
+            if (!child) return null
+            n = child
+          }
           return n
         })()
         if (node?.type === 'dir') {

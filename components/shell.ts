@@ -73,7 +73,7 @@ function getNode(fs: FS, path: string): FSNode | null {
   let node: FSNode = fs
   for (const part of parts) {
     if (node.type !== 'dir') return null
-    const child = node.children[part]
+    const child: FSNode | undefined = node.children[part]
     if (!child) return null
     node = child
   }
@@ -368,7 +368,7 @@ export function runCommand(state: ShellState, raw: string): { output: string; cl
       const dir = args.find(a => !a.startsWith('-')) ?? state.cwd
       const resolved = resolvePath(state.fs, state.cwd, dir)
       const results: string[] = []
-      function walk(node: FSNode, path: string) {
+      function walk(node: FSNode, path: string): void {
         results.push(path)
         if (node.type === 'dir') {
           for (const [name, child] of Object.entries(node.children)) {
