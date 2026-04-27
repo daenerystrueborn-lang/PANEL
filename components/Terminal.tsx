@@ -1,14 +1,7 @@
 'use client'
 
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { createShell, runCommand, ShellState, FSNode } from './shell'
 import styles from './Terminal.module.css'
-
-interface Line {
-  type: 'prompt' | 'output' | 'error' | 'banner'
-  text: string
-  cmd?: string
-}
 
 const BANNER = `
  ██╗    ██╗███████╗██████╗ ████████╗███████╗██████╗ ███╗   ███╗
@@ -18,64 +11,133 @@ const BANNER = `
  ╚███╔███╔╝███████╗██████╔╝   ██║   ███████╗██║  ██║██║ ╚═╝ ██║
   ╚══╝╚══╝ ╚══════╝╚═════╝    ╚═╝   ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝
 
- web terminal  •  type 'help' to get started  •  no AI, no key needed
+ real terminal  •  connected to your machine via WebSocket
  ─────────────────────────────────────────────────────────────────────
 `.trim()
 
+const WS_URL = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:3001'
+
+function AnsiText({ text }: { text: string }) {
+  const parts: { text: string; style: React.CSSProperties }[] = []
+  const ansiRegex = /\x1b\[([0-9;]*)m/g
+  let lastIndex = 0
+  let currentStyle: React.CSSProperties = {}
+
+  const colorMap: Record<number, string> = {
+    30: '#2e2e2e', 31: '#ff5f56', 32: '#27c93f', 33: '#ffbd2e',
+    34: '#4d9de0', 35: '#c678dd', 36: '#56b6c2', 37: '#abb2bf',
+    90: '#666',   91: '#ff6b6b', 92: '#98c379', 93: '#e5c07b',
+    94: '#61afef', 95: '#c678dd', 96: '#56b6c2', 97: '#ffffff',
+  }
+
+  let match
+  while ((match = ansiRegex.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      parts.push({ text: text.slice(lastIndex, match.index), style: { ...currentStyle } })
+    }
+    const codes = match[1].split(';').map(Number)
+    for (const code of codes) {
+      if (code === 0) currentStyle = {}
+      else if (code === 1) currentStyle = { ...currentStyle, fontWeight: 'bold' }
+      else if (code === 2) currentStyle = { ...currentStyle, opacity: 0.6 }
+      else if (code === 3) currentStyle = { ...currentStyle, fontStyle: 'italic' }
+      else if (code === 4) currentStyle = { ...currentStyle, textDecoration: 'underline' }
+      else if (colorMap[code]) currentStyle = { ...currentStyle, color: colorMap[code] }
+      else if (code >= 40 && code <= 47) {
+        const bg = colorMap[code - 10]
+        if (bg) currentStyle = { ...currentStyle, backgroundColor: bg }
+      }
+    }
+    lastIndex = match.index + match[0].length
+  }
+
+  if (lastIndex < text.length) {
+    parts.push({ text: text.slice(lastIndex), style: { ...currentStyle } })
+  }
+  if (parts.length === 0) parts.push({ text, style: {} })
+
+  return (
+    <>
+      {parts.map((p, i) => (
+        <span key={i} style={p.style}>{p.text}</span>
+      ))}
+    </>
+  )
+}
+
 export default function Terminal() {
-  const [lines, setLines] = useState<Line[]>([{ type: 'banner', text: BANNER }])
+  const [output, setOutput] = useState<string>(BANNER + '\n\n')
   const [input, setInput] = useState('')
   const [cmdHistory, setCmdHistory] = useState<string[]>([])
   const [historyIndex, setHistoryIndex] = useState(-1)
-  const shellRef = useRef<ShellState>(createShell())
+  const [connected, setConnected] = useState(false)
+  const [connecting, setConnecting] = useState(true)
+
+  const wsRef = useRef<WebSocket | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
-  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [lines])
-  useEffect(() => { inputRef.current?.focus() }, [])
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [output])
 
-  const getCwd = () => {
-    const cwd = shellRef.current.cwd
-    const home = shellRef.current.env.HOME
-    return cwd.startsWith(home) ? '~' + cwd.slice(home.length) : cwd
-  }
+  useEffect(() => {
+    inputRef.current?.focus()
+  }, [])
 
-  const [cwd, setCwd] = useState('~')
+  useEffect(() => {
+    setConnecting(true)
+    const ws = new WebSocket(WS_URL)
+    wsRef.current = ws
 
-  const execute = useCallback((raw: string) => {
-    const trimmed = raw.trim()
-    const shell = shellRef.current
-
-    // Record in shell history
-    if (trimmed) {
-      shell.history.push(trimmed)
-      setCmdHistory(h => [trimmed, ...h])
-    }
-    setHistoryIndex(-1)
-
-    const result = trimmed ? runCommand(shell, trimmed) : { output: '' }
-    setCwd(getCwd())
-
-    if (result.clear) {
-      setLines([])
-      return
+    ws.onopen = () => {
+      setConnected(true)
+      setConnecting(false)
+      ws.send(JSON.stringify({ type: 'resize', cols: 120, rows: 40 }))
     }
 
-    setLines(l => {
-      const next: Line[] = [...l, { type: 'prompt', text: trimmed, cmd: trimmed }]
-      if (result.output) {
-        const isError = result.output.startsWith('bash:') || result.output.includes(': No such') || result.output.includes('not found')
-        next.push({ type: isError ? 'error' : 'output', text: result.output })
+    ws.onmessage = (e) => {
+      try {
+        const msg = JSON.parse(e.data)
+        if (msg.type === 'output') {
+          const clean = msg.data.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+          setOutput(prev => prev + clean)
+        } else if (msg.type === 'exit') {
+          setOutput(prev => prev + '\n[Process exited]\n')
+          setConnected(false)
+        }
+      } catch {
+        setOutput(prev => prev + e.data)
       }
-      return next
-    })
+    }
+
+    ws.onclose = () => {
+      setConnected(false)
+      setConnecting(false)
+      setOutput(prev => prev + '\n\x1b[31m[Disconnected from server]\x1b[0m\n')
+    }
+
+    ws.onerror = () => {
+      setConnecting(false)
+      setOutput(prev => prev + '\n\x1b[31m[Could not connect to terminal server]\x1b[0m\n\x1b[33m→ Run: node server.js\x1b[0m\n\n')
+    }
+
+    return () => ws.close()
+  }, [])
+
+  const sendInput = useCallback((text: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'input', data: text }))
+    }
   }, [])
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') {
       const cmd = input
+      if (cmd.trim()) setCmdHistory(h => [cmd, ...h])
+      setHistoryIndex(-1)
       setInput('')
-      execute(cmd)
+      sendInput(cmd + '\n')
     } else if (e.key === 'ArrowUp') {
       e.preventDefault()
       const next = Math.min(historyIndex + 1, cmdHistory.length - 1)
@@ -86,50 +148,26 @@ export default function Terminal() {
       const next = Math.max(historyIndex - 1, -1)
       setHistoryIndex(next)
       setInput(next === -1 ? '' : cmdHistory[next])
-    } else if (e.key === 'l' && e.ctrlKey) {
+    } else if (e.ctrlKey) {
       e.preventDefault()
-      setLines([])
-    } else if (e.key === 'c' && e.ctrlKey) {
-      e.preventDefault()
-      setLines(l => [...l, { type: 'prompt', text: input + '^C' }])
-      setInput('')
+      const ctrlMap: Record<string, string> = {
+        c: '\x03', d: '\x04', z: '\x1a',
+        a: '\x01', e: '\x05', k: '\x0b',
+        u: '\x15', w: '\x17', r: '\x12',
+        l: '\x0c',
+      }
+      const char = ctrlMap[e.key.toLowerCase()]
+      if (char) {
+        if (e.key.toLowerCase() === 'l') setOutput('')
+        sendInput(char)
+      }
     } else if (e.key === 'Tab') {
       e.preventDefault()
-      // Basic tab completion
-      const parts = input.split(' ')
-      const last = parts[parts.length - 1]
-      if (last) {
-        // Try to complete filenames
-        const shell = shellRef.current
-        const dir = last.includes('/') ? last.slice(0, last.lastIndexOf('/') + 1) : ''
-        const prefix = last.includes('/') ? last.slice(last.lastIndexOf('/') + 1) : last
-        const resolvedDir = dir
-          ? (last.startsWith('/') ? dir : shell.cwd + '/' + dir)
-          : shell.cwd
-        const normalized = resolvedDir.replace(/\/+/g, '/').replace(/\/$/, '') || '/'
-        const node = normalized === '/' ? shell.fs : (() => {
-          const p = normalized.split('/').filter(Boolean)
-          let n: FSNode = shell.fs
-          for (const seg of p) {
-            if (n.type !== 'dir') return null
-            const child: FSNode | undefined = n.children[seg]
-            if (!child) return null
-            n = child
-          }
-          return n
-        })()
-        if (node?.type === 'dir') {
-          const matches = Object.keys(node.children).filter(k => k.startsWith(prefix))
-          if (matches.length === 1) {
-            parts[parts.length - 1] = dir + matches[0]
-            setInput(parts.join(' '))
-          }
-        }
-      }
+      sendInput('\t')
     }
   }
 
-  const promptUser = shellRef.current.env.USER
+  const lines = output.split('\n')
 
   return (
     <div className={styles.container} onClick={() => inputRef.current?.focus()}>
@@ -139,37 +177,23 @@ export default function Terminal() {
           <span className={`${styles.dot} ${styles.yellow}`} />
           <span className={`${styles.dot} ${styles.green}`} />
         </div>
-        <span className={styles.titleText}>{promptUser}@webterm: {cwd}</span>
+        <span className={styles.titleText}>
+          {connecting ? '⟳ connecting...' : connected ? '● real terminal' : '○ disconnected — run: node server.js'}
+        </span>
         <div style={{ width: 60 }} />
       </div>
 
       <div className={styles.screen}>
-        {lines.map((line, i) => (
-          <div key={i}>
-            {line.type === 'banner' && <pre className={styles.banner}>{line.text}</pre>}
-            {line.type === 'prompt' && (
-              <div className={styles.promptLine}>
-                <span className={styles.pUser}>{promptUser}</span>
-                <span className={styles.pAt}>@</span>
-                <span className={styles.pHost}>webterm</span>
-                <span className={styles.pColon}>:</span>
-                <span className={styles.pDir}>{cwd}</span>
-                <span className={styles.pDollar}>$</span>
-                <span className={styles.pCmd}>{line.text}</span>
-              </div>
-            )}
-            {line.type === 'output' && <pre className={styles.output}>{line.text}</pre>}
-            {line.type === 'error' && <pre className={styles.errOut}>{line.text}</pre>}
-          </div>
-        ))}
+        <pre className={styles.output}>
+          {lines.map((line, i) => (
+            <div key={i}>
+              <AnsiText text={line} />
+              {i < lines.length - 1 && '\n'}
+            </div>
+          ))}
+        </pre>
 
         <div className={styles.inputRow}>
-          <span className={styles.pUser}>{promptUser}</span>
-          <span className={styles.pAt}>@</span>
-          <span className={styles.pHost}>webterm</span>
-          <span className={styles.pColon}>:</span>
-          <span className={styles.pDir}>{cwd}</span>
-          <span className={styles.pDollar}>$</span>
           <input
             ref={inputRef}
             className={styles.inputField}
@@ -180,6 +204,8 @@ export default function Terminal() {
             autoComplete="off"
             autoCapitalize="off"
             autoCorrect="off"
+            placeholder={connected ? '' : 'not connected...'}
+            disabled={!connected}
           />
         </div>
 
