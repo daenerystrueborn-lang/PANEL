@@ -86,7 +86,7 @@ function setNode(fs: FS, path: string, node: FSNode): boolean {
   let current: FSNode = fs
   for (let i = 0; i < parts.length - 1; i++) {
     if (current.type !== 'dir') return false
-    const child = current.children[parts[i]]
+    const child: FSNode | undefined = current.children[parts[i]]
     if (!child) return false
     current = child
   }
@@ -101,7 +101,7 @@ function deleteNode(fs: FS, path: string): boolean {
   let current: FSNode = fs
   for (let i = 0; i < parts.length - 1; i++) {
     if (current.type !== 'dir') return false
-    const child = current.children[parts[i]]
+    const child: FSNode | undefined = current.children[parts[i]]
     if (!child) return false
     current = child
   }
